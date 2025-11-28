@@ -183,7 +183,7 @@ float heston_euler_simulation_with_paths(int use_abs)
                         cudaMemcpyDeviceToHost));
 
     // Salva in CSV: time,path0,path1,...,path{N_SAVE-1}
-    FILE *csv = fopen("paths.csv", "w");
+    FILE *csv = fopen("results/paths.csv", "w");
     if (!csv) {
         fprintf(stderr, "Errore apertura paths.csv\n");
     } else {

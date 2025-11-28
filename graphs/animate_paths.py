@@ -6,8 +6,8 @@ from matplotlib.animation import FuncAnimation, FFMpegWriter
 # =========================================================
 # CONFIG
 # =========================================================
-CSV_PATH     = "../results/paths.csv"          # prima colonna = t, resto = paths
-OUTPUT_MP4   = "../results/heston_paths_trading_style.mp4"
+CSV_PATH     = "results/paths.csv"          # prima colonna = t, resto = paths
+OUTPUT_MP4   = "results/heston_paths_trading_style.mp4"
 MAX_PATHS    = 20                   # quanti path mostrare
 STEP         = 10                   # prendo un frame ogni STEP time-step
 FPS          = 15                   # fotogrammi al secondo (più basso = più lento)
