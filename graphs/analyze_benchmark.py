@@ -10,7 +10,7 @@ import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def main(csv_path: str = "benchmark_results.csv"):
+def main(csv_path: str = "results/benchmark_results.csv"):
     # ------------------------------------------------------------------
     # 1. Caricamento dati
     # ------------------------------------------------------------------
@@ -38,7 +38,7 @@ def main(csv_path: str = "benchmark_results.csv"):
 
     fig.suptitle("Execution time by method and M")
     fig.tight_layout()
-    fig.savefig("boxplot_time_by_method_M.png", dpi=200)
+    fig.savefig("results/boxplot_time_by_method_M.png", dpi=200)
 
     # ------------------------------------------------------------------
     # 3. Scatter time_ms vs kappa, theta, sigma
@@ -63,7 +63,7 @@ def main(csv_path: str = "benchmark_results.csv"):
     axes[0].legend(fontsize=8)
     fig.suptitle("Execution time vs parameters")
     fig.tight_layout()
-    fig.savefig("scatter_time_vs_params.png", dpi=200)
+    fig.savefig("results/scatter_time_vs_params.png", dpi=200)
 
     # ------------------------------------------------------------------
     # 4. Confronto prezzi:
@@ -116,7 +116,7 @@ def main(csv_path: str = "benchmark_results.csv"):
     plt.title("Histogram of price differences")
     plt.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
-    plt.savefig("hist_price_diff.png", dpi=200)
+    plt.savefig("results/hist_price_diff.png", dpi=200)
 
     # Istogramma errore relativo
     plt.figure(figsize=(6, 4))
@@ -126,7 +126,7 @@ def main(csv_path: str = "benchmark_results.csv"):
     plt.title("Histogram of relative errors")
     plt.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
-    plt.savefig("hist_rel_error.png", dpi=200)
+    plt.savefig("results/hist_rel_error.png", dpi=200)
 
     print("\nFigure salvate come:")
     print("  - boxplot_time_by_method_M.png")
