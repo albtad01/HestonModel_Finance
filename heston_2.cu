@@ -1,6 +1,5 @@
 // Alberto Taddei & Thies Weel
 // Heston Model Monte Carlo - Step 2: Exact Simulation with Gamma Distribution
-// Optimized: RNG Initialization moved outside the simulation loop
 
 #include <stdio.h>
 #include <math.h>
@@ -8,7 +7,7 @@
 
 #define THREADS_PER_BLOCK 256
 #define NUM_BLOCKS 1024
-#define TOTAL_PATHS (THREADS_PER_BLOCK * NUM_BLOCKS)
+#define TOTAL_PATHS (THREADS_PER_BLOCK * NUM_BLOCKS) // 262,144 paths
 
 // Model parameters
 #define S0 1.0f
@@ -20,8 +19,9 @@
 #define rho -0.5f
 #define T 1.0f
 #define K 1.0f
-#define M 1000
+#define M 1000 // Number of time steps (Δt = 1/M)
 
+// Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
     if (error != cudaSuccess) {
         printf("CUDA error at %s:%d: %s\n", file, line, cudaGetErrorString(error));
@@ -30,11 +30,7 @@ void testCUDA(cudaError_t error, const char *file, int line) {
 }
 #define testCUDA(error) (testCUDA(error, __FILE__, __LINE__))
 
-
-/////////////////////////////////////////////////////////////////////////////
-// KERNEL DI INIZIALIZZAZIONE RNG (Separato)
-// Eseguito una volta sola per preparare gli stati
-/////////////////////////////////////////////////////////////////////////////
+// Random Number Generator init kernel
 __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < TOTAL_PATHS) {
@@ -42,57 +38,48 @@ __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
     }
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
-// GAMMA DISTRIBUTION DEVICE FUNCTION - Paper [8]
-/////////////////////////////////////////////////////////////////////////////
+// GAMMA DISTRIBUTION DEVICE FUNCTION from Paper [8]
 __device__ float gamma_distribution(curandState *state, float alpha) {
-    
-    if (alpha >= 1.0f) {
-        // Case α >= 1: algorithm [8]
-        float d = alpha - 1.0f/3.0f;
-        float c = 1.0f / sqrtf(9.0f * d);
-        
-        while (true) {
-            float x, v;
-            do {
-                x = curand_normal(state);
-                v = 1.0f + c * x;
-            } while (v <= 0.0f);
-            
-            v = v * v * v;  // v = (1 + cx)³
-            float u = curand_uniform(state);
-            
-            float x2 = x * x;
-            if (u < 1.0f - 0.0331f * x2 * x2) {
-                return d * v;
-            }
-            
-            if (logf(u) < 0.5f * x2 + d * (1.0f - v + logf(v))) {
-                return d * v;
-            }
-        }
-        
-    } else {
-        // Case α < 1: Use Gamma(α+1) and scale
-        float gamma_plus_1 = gamma_distribution(state, alpha + 1.0f);
+    float boost_factor = 1.0f;
+
+    // Case α < 1
+    if (alpha < 1.0f) {
         float u = curand_uniform(state);
-        return gamma_plus_1 * powf(u, 1.0f / alpha);
+        boost_factor = powf(u, 1.0f / alpha);
+        alpha += 1.0f;
+    }
+
+    // Case α >= 1
+    float d = alpha - 1.0f / 3.0f;
+    float c = 1.0f / sqrtf(9.0f * d);
+
+    while (true) {
+        float x, v;
+        do {
+            x = curand_normal(state);
+            v = 1.0f + c * x;
+        } while (v <= 0.0f);
+
+        v = v * v * v;
+        float u = curand_uniform(state);
+
+        float x2 = x * x;
+        if (u < 1.0f - 0.0331f * x2 * x2) {
+            return d * v * boost_factor;
+        }
+
+        if (logf(u) < 0.5f * x2 + d * (1.0f - v + logf(v))) {
+            return d * v * boost_factor;
+        }
     }
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
-// STEP 2: Exact Simulation Kernel
-// Ora prende in input lo stato RNG già inizializzato
-/////////////////////////////////////////////////////////////////////////////
+// Exact Simulation Kernel
 __global__ void heston_exact_kernel(float *payoffs, curandState *states) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= TOTAL_PATHS) return;
     
-    // IMPORTANTE: Copiamo lo stato dalla memoria globale (Lenta) 
-    // ai registri locali (Veloci) per la durata della simulazione.
     curandState localState = states[idx];
     
     float dt = T / (float)M;
@@ -139,16 +126,10 @@ __global__ void heston_exact_kernel(float *payoffs, curandState *states) {
     
     // Payoff
     payoffs[idx] = fmaxf(S1 - K, 0.0f);
-
-    // Opzionale: Se dovessimo fare altre simulazioni in futuro con questo stato,
-    // dovremmo salvare localState indietro in states[idx].
-    // states[idx] = localState; 
+    states[idx] = localState; 
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
 // Reduction kernel
-/////////////////////////////////////////////////////////////////////////////
 __global__ void reduction_kernel(float *payoffs, float *partial_sums, int N) {
     extern __shared__ float sdata[];
     
@@ -170,36 +151,30 @@ __global__ void reduction_kernel(float *payoffs, float *partial_sums, int N) {
     }
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
 // Host function for exact simulation
-/////////////////////////////////////////////////////////////////////////////
 float heston_exact_simulation() {
     
     float *d_payoffs, *d_partial_sums;
-    curandState *d_states; // Puntatore per gli stati RNG
+    curandState *d_states;
 
-    // Allocazione memoria
     testCUDA(cudaMalloc(&d_payoffs, TOTAL_PATHS * sizeof(float)));
     testCUDA(cudaMalloc(&d_partial_sums, NUM_BLOCKS * sizeof(float)));
     testCUDA(cudaMalloc(&d_states, TOTAL_PATHS * sizeof(curandState))); // Allocazione stati
     
-    // 1. Inizializzazione RNG (Fuori dal timer della simulazione "core", o incluso se richiesto dal benchmark totale)
-    // Solitamente l'init si considera "setup". Qui lo facciamo prima.
+    // 1. Random number generator initialization
     printf("Initializing RNG states...\n");
     init_rng_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_states, 12345UL);
     testCUDA(cudaGetLastError());
-    testCUDA(cudaDeviceSynchronize()); // Assicuriamoci che l'init sia finito
+    testCUDA(cudaDeviceSynchronize());
 
     // Setup Timer
     cudaEvent_t start, stop;
     testCUDA(cudaEventCreate(&start));
     testCUDA(cudaEventCreate(&stop));
     
-    // Inizio misura tempo di ESECUZIONE (Simulazione pura)
     testCUDA(cudaEventRecord(start, 0));
     
-    // 2. Launch exact simulation kernel (Passiamo d_states)
+    // 2. Launch exact simulation kernel
     heston_exact_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_payoffs, d_states);
     testCUDA(cudaGetLastError());
     
@@ -208,7 +183,7 @@ float heston_exact_simulation() {
         d_payoffs, d_partial_sums, TOTAL_PATHS);
     testCUDA(cudaGetLastError());
     
-    // Fine misura tempo GPU
+    // End of GPU 
     testCUDA(cudaEventRecord(stop, 0));
     testCUDA(cudaEventSynchronize(stop));
     
@@ -239,17 +214,14 @@ float heston_exact_simulation() {
     free(h_partial_sums);
     testCUDA(cudaFree(d_payoffs));
     testCUDA(cudaFree(d_partial_sums));
-    testCUDA(cudaFree(d_states)); // Free degli stati
+    testCUDA(cudaFree(d_states)); 
     testCUDA(cudaEventDestroy(start));
     testCUDA(cudaEventDestroy(stop));
     
     return option_price;
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
-// Main
-/////////////////////////////////////////////////////////////////////////////
+// Main Function
 int main(void) {
     
     printf("============================================================\n");

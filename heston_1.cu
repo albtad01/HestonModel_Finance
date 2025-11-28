@@ -16,10 +16,10 @@
 #define kappa 0.5f
 #define theta 0.1f
 #define sigma 0.3f
-#define rho 0.0f  // Correlation (can be changed)
+#define rho 0.0f
 #define T 1.0f
 #define K 1.0f
-#define M 1000  // Number of time steps (Δt = 1/1000)
+#define M 1000  // Number of time steps (Δt = 1/M)
 
 // Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
@@ -30,18 +30,21 @@ void testCUDA(cudaError_t error, const char *file, int line) {
 }
 #define testCUDA(error) (testCUDA(error, __FILE__, __LINE__))
 
+// Random Number Generator init kernel
+__global__ void init_rng_kernel(curandState *states, unsigned long seed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < TOTAL_PATHS) {
+        curand_init(seed, idx, 0, &states[idx]);
+    }
+}
 
-/////////////////////////////////////////////////////////////////////////////
-// STEP 1: Euler Discretization Kernel
+// Euler Discretization Kernel
 // Simulates one path of (S_t, v_t) using Euler scheme and returns payoff
-/////////////////////////////////////////////////////////////////////////////
-__global__ void heston_euler_kernel(float *payoffs, unsigned long seed, int use_abs) {
+__global__ void heston_euler_kernel(float *payoffs, curandState *states, int use_abs) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Initialize random number generator for this thread
-    curandState state;
-    curand_init(seed, idx, 0, &state);
+    curandState localState = states[idx];
     
     // Time discretization
     float dt = T / (float)M;
@@ -56,8 +59,8 @@ __global__ void heston_euler_kernel(float *payoffs, unsigned long seed, int use_
     for (int step = 0; step < M; step++) {
         
         // Generate two independent standard normal random variables
-        float G1 = curand_normal(&state);
-        float G2 = curand_normal(&state);
+        float G1 = curand_normal(&localState);
+        float G2 = curand_normal(&localState);
         
         // Compute correlated Brownian motion for S
         float dZ = rho * G1 + sqrt_1_minus_rho2 * G2;
@@ -72,7 +75,7 @@ __global__ void heston_euler_kernel(float *payoffs, unsigned long seed, int use_
         
         // Apply function g: either (·)+ or |·|
         if (use_abs) {
-            v = fabsf(v_new);
+            v = fabsf(v_new); // |·|
         } else {
             v = fmaxf(v_new, 0.0f);  // (·)+ = max(·, 0)
         }
@@ -83,12 +86,11 @@ __global__ void heston_euler_kernel(float *payoffs, unsigned long seed, int use_
     
     // Store result
     payoffs[idx] = payoff;
+    states[idx] = localState; 
+
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
 // Reduction kernel to sum payoffs (parallel reduction)
-/////////////////////////////////////////////////////////////////////////////
 __global__ void reduction_kernel(float *payoffs, float *partial_sums, int N) {
     
     extern __shared__ float sdata[];
@@ -114,26 +116,30 @@ __global__ void reduction_kernel(float *payoffs, float *partial_sums, int N) {
     }
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
 // Host function to run Euler simulation
-/////////////////////////////////////////////////////////////////////////////
 float heston_euler_simulation(int use_abs, int verbose = 1) {
     
     // Allocate device memory
     float *d_payoffs, *d_partial_sums;
+    curandState *d_states;
     testCUDA(cudaMalloc(&d_payoffs, TOTAL_PATHS * sizeof(float)));
     testCUDA(cudaMalloc(&d_partial_sums, NUM_BLOCKS * sizeof(float)));
+    testCUDA(cudaMalloc(&d_states, TOTAL_PATHS * sizeof(curandState)));
     
-    // Timing
+    // 1) Random Number Generator initialization
+    unsigned long seed = 12345UL;
+    init_rng_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_states, seed);
+    testCUDA(cudaGetLastError());
+    testCUDA(cudaDeviceSynchronize());
+
+    // 2) Timing
     cudaEvent_t start, stop;
     testCUDA(cudaEventCreate(&start));
     testCUDA(cudaEventCreate(&stop));
     testCUDA(cudaEventRecord(start, 0));
-    
-    // Launch Euler kernel
-    unsigned long seed = 12345UL;
-    heston_euler_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_payoffs, seed, use_abs);
+
+    // 3) Launch Euler kernel
+    heston_euler_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_payoffs, d_states, use_abs);
     testCUDA(cudaGetLastError());
     
     // Reduction to sum all payoffs
@@ -171,16 +177,14 @@ float heston_euler_simulation(int use_abs, int verbose = 1) {
     free(h_partial_sums);
     testCUDA(cudaFree(d_payoffs));
     testCUDA(cudaFree(d_partial_sums));
+    testCUDA(cudaFree(d_states));
     testCUDA(cudaEventDestroy(start));
     testCUDA(cudaEventDestroy(stop));
     
     return option_price;
 }
 
-
-/////////////////////////////////////////////////////////////////////////////
 // Main function
-/////////////////////////////////////////////////////////////////////////////
 int main(void) {
     
     printf("=============================================================\n");
@@ -195,10 +199,10 @@ int main(void) {
     printf("=============================================================\n");
     
     // Test with g(x) = (x)+
-    float price_positive = heston_euler_simulation(0);  // use_abs = 0 → (·)+
+    float price_positive = heston_euler_simulation(0);  // use_abs = 0 : (·)+
     
     // Test with g(x) = |x|
-    float price_abs = heston_euler_simulation(1);  // use_abs = 1 → |·|
+    float price_abs = heston_euler_simulation(1);  // use_abs = 1 : |·|
     
     printf("\n=============================================================\n");
     printf("Comparison of variance truncation methods:\n");

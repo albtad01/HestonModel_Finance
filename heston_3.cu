@@ -1,9 +1,6 @@
 // Alberto Taddei & Thies Weel
 // Heston Model Monte Carlo - Step 3: Performance Comparison
 // Euler vs Almost Exact Scheme
-// - RNG inizializzato fuori dal loop
-// - Memoria device riutilizzata
-// - Stati RNG separati per Euler e Almost Exact
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +20,7 @@
 #define T  1.0f
 #define K  1.0f
 
+// Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
     if (error != cudaSuccess) {
         printf("CUDA error at %s:%d: %s\n", file, line,
@@ -32,9 +30,7 @@ void testCUDA(cudaError_t error, const char *file, int line) {
 }
 #define testCUDA(error) (testCUDA(error, __FILE__, __LINE__))
 
-//===============================================================
-// STRUCTS
-//===============================================================
+// Structures
 typedef struct {
     float kappa;
     float theta;
@@ -52,9 +48,7 @@ typedef struct {
     float price;
 } BenchmarkResult;
 
-//===============================================================
-// RNG INIT KERNEL
-//===============================================================
+// Random Number Generator init kernel
 __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < TOTAL_PATHS) {
@@ -62,20 +56,18 @@ __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
     }
 }
 
-//===============================================================
-// GAMMA DISTRIBUTION (Marsaglia & Tsang, non ricorsiva)
-//===============================================================
+// GAMMA DISTRIBUTION DEVICE FUNCTION from Paper [8]
 __device__ float gamma_distribution(curandState *state, float alpha) {
     float boost_factor = 1.0f;
 
-    // Gestione alpha < 1 senza ricorsione
+    // Case α < 1
     if (alpha < 1.0f) {
         float u = curand_uniform(state);
         boost_factor = powf(u, 1.0f / alpha);
         alpha += 1.0f;
     }
 
-    // Ora alpha >= 1
+    // Case α >= 1
     float d = alpha - 1.0f / 3.0f;
     float c = 1.0f / sqrtf(9.0f * d);
 
@@ -100,9 +92,7 @@ __device__ float gamma_distribution(curandState *state, float alpha) {
     }
 }
 
-//===============================================================
-// KERNEL 1: EULER DISCRETIZATION
-//===============================================================
+// Kernel 1: EXACT SIMULATION
 __global__ void heston_euler_kernel(
     float * __restrict__ payoffs,
     curandState * __restrict__ states,
@@ -137,14 +127,10 @@ __global__ void heston_euler_kernel(
     }
 
     payoffs[idx] = fmaxf(S - K, 0.0f);
-
-    // Salvo lo stato se voglio usare la sequenza in run successivi
     states[idx] = localState;
 }
 
-//===============================================================
-// KERNEL 2: ALMOST EXACT SCHEME
-//===============================================================
+// Kernel 2: ALMOST EXACT SCHEME
 __global__ void heston_almost_exact_kernel(
     float * __restrict__ payoffs,
     curandState * __restrict__ states,
@@ -162,11 +148,9 @@ __global__ void heston_almost_exact_kernel(
     float dt           = T / (float)M;
     float exp_kappa_dt = expf(-kappa * dt);
 
-    // Variance constants (CIR exact vt)
     float d     = 2.0f * kappa * theta / (sigma * sigma);
     float coeff = sigma * sigma * (1.0f - exp_kappa_dt) / (2.0f * kappa);
 
-    // Coefficienti k0, k1, k2 (come da testo / [10])
     float k0 = (-rho / sigma * kappa * theta) * dt;
     float k1 = (rho * kappa / sigma - 0.5f) * dt - rho / sigma;
     float k2 = rho / sigma;
@@ -179,7 +163,6 @@ __global__ void heston_almost_exact_kernel(
     for (int step = 0; step < M; ++step) {
         float v_old = v;
 
-        // vt+Δt esatto via Poisson + Gamma
         float lambda = 2.0f * kappa * exp_kappa_dt * v_old /
                        (sigma * sigma * (1.0f - exp_kappa_dt));
         unsigned int N     = curand_poisson(&localState, lambda);
@@ -187,11 +170,9 @@ __global__ void heston_almost_exact_kernel(
         float gamma_sample = gamma_distribution(&localState, alpha);
         v = coeff * gamma_sample;
 
-        // Normali indipendenti
         float G1 = curand_normal(&localState);
         float G2 = curand_normal(&localState);
 
-        // Termine diffusivo "quasi esatto" per log(S)
         float diffusion_term =
             sqrtf((1.0f - rho * rho) * v_old * dt) *
             (rho * G1 + sqrt_1_rho2 * G2);
@@ -205,9 +186,7 @@ __global__ void heston_almost_exact_kernel(
     states[idx] = localState;
 }
 
-//===============================================================
-// REDUCTION KERNEL
-//===============================================================
+// Reduction Kernel
 __global__ void reduction_kernel(float * __restrict__ payoffs,
                                  float * __restrict__ partial_sums,
                                  int N)
@@ -232,9 +211,7 @@ __global__ void reduction_kernel(float * __restrict__ payoffs,
     }
 }
 
-//===============================================================
-// BENCHMARK FUNCTION (usa buffer pre-allocati)
-//===============================================================
+// Benchmark function
 BenchmarkResult run_benchmark(
     float *d_payoffs,
     float *d_partial_sums,
@@ -266,7 +243,7 @@ BenchmarkResult run_benchmark(
     testCUDA(cudaEventRecord(stop, 0));
     testCUDA(cudaEventSynchronize(stop));
 
-    // Sommo su host
+    // Sum on host
     testCUDA(cudaMemcpy(h_partial_sums, d_partial_sums,
                         NUM_BLOCKS * sizeof(float),
                         cudaMemcpyDeviceToHost));
@@ -296,9 +273,7 @@ BenchmarkResult run_benchmark(
     return result;
 }
 
-//===============================================================
-// PARAMETER GENERATION
-//===============================================================
+// Parameter Generation
 void generate_param_sets(ParamSet *params, int n_samples) {
     srand(time(NULL));
 
@@ -313,7 +288,6 @@ void generate_param_sets(ParamSet *params, int n_samples) {
         float theta = 0.01f + (float)rand() / RAND_MAX * (0.5f - 0.01f);
         float sigma = 0.1f + (float)rand() / RAND_MAX * (1.0f - 0.1f);
 
-        // Feller condition: 2 κ θ > σ²
         if (2.0f * kappa * theta > sigma * sigma) {
             params[count].kappa = kappa;
             params[count].theta = theta;
@@ -328,9 +302,7 @@ void generate_param_sets(ParamSet *params, int n_samples) {
     }
 }
 
-//===============================================================
-// MAIN
-//===============================================================
+// Main Function
 int main(void) {
 
     printf("===============================================================\n");
@@ -343,7 +315,7 @@ int main(void) {
     printf("Paths per test: %d\n", TOTAL_PATHS);
     printf("===============================================================\n\n");
 
-    // 1. Parametri
+    // Parameters
     const int N_PARAM_SETS = 30;
     ParamSet *param_sets =
         (ParamSet*)malloc(N_PARAM_SETS * sizeof(ParamSet));
@@ -374,7 +346,7 @@ int main(void) {
     BenchmarkResult *results =
         (BenchmarkResult*)malloc(total_tests * sizeof(BenchmarkResult));
 
-    // 2. Allocazione buffer device/host
+    // 2. Buffer allocation on device/host
     float *d_payoffs, *d_partial_sums;
     curandState *d_states_euler, *d_states_almost;
     testCUDA(cudaMalloc(&d_payoffs,      TOTAL_PATHS * sizeof(float)));
@@ -383,7 +355,7 @@ int main(void) {
     testCUDA(cudaMalloc(&d_states_almost,TOTAL_PATHS  * sizeof(curandState)));
     float *h_partial_sums = (float*)malloc(NUM_BLOCKS * sizeof(float));
 
-    // 3. Inizializzazione RNG
+    // 3. Random Number Generator initialization
     printf("Initializing RNG states...\n");
     init_rng_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_states_euler,  12345UL);
     init_rng_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK>>>(d_states_almost, 54321UL);
@@ -432,7 +404,7 @@ int main(void) {
     }
     printf("] Done!\n\n");
 
-    // 5. ANALISI
+    // 5. ANALYSIS
     printf("===============================================================\n");
     printf("PERFORMANCE ANALYSIS\n");
     printf("===============================================================\n\n");
