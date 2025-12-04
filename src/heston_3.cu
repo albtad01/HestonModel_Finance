@@ -92,7 +92,7 @@ __device__ float gamma_distribution(curandState *state, float alpha) {
     }
 }
 
-// Kernel 1: EXACT SIMULATION
+// Kernel 1: EULER SIMULATION
 __global__ void heston_euler_kernel(
     float * __restrict__ payoffs,
     curandState * __restrict__ states,
