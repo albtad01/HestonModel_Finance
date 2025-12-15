@@ -20,6 +20,10 @@
 #define T  1.0f
 #define K  1.0f
 
+// Ratio Bound: 2kappa theta  > sig2  for standard, or 20kappa theta  > sig2  as per Q3
+// This means sig2 /(kappa theta ) < RATIO_BOUND
+#define RATIO_BOUND 20.0f  // Change to 2.0f for standard Ratio Bound
+
 // Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
     if (error != cudaSuccess) {
@@ -60,14 +64,14 @@ __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
 __device__ float gamma_distribution(curandState *state, float alpha) {
     float boost_factor = 1.0f;
 
-    // Case α < 1
+    // Case alpha  < 1
     if (alpha < 1.0f) {
         float u = curand_uniform(state);
         boost_factor = powf(u, 1.0f / alpha);
         alpha += 1.0f;
     }
 
-    // Case α >= 1
+    // Case alpha  >= 1
     float d = alpha - 1.0f / 3.0f;
     float c = 1.0f / sqrtf(9.0f * d);
 
@@ -92,7 +96,7 @@ __device__ float gamma_distribution(curandState *state, float alpha) {
     }
 }
 
-// Kernel 1: EULER SIMULATION
+// Kernel 1: EULER SCHEME
 __global__ void heston_euler_kernel(
     float * __restrict__ payoffs,
     curandState * __restrict__ states,
@@ -119,7 +123,8 @@ __global__ void heston_euler_kernel(
         float G2 = curand_normal(&localState);
         float dZ = rho * G1 + sqrt_1_rho2 * G2;
 
-        S = S + r * S * dt + sqrtf(fmaxf(v, 0.0f)) * S * sqrt_dt * dZ;
+        S = S + r * S * dt
+            + sqrtf(fmaxf(v, 0.0f)) * S * sqrt_dt * dZ;
 
         float v_new = v + kappa * (theta - v) * dt
                         + sigma * sqrtf(fmaxf(v, 0.0f)) * sqrt_dt * G1;
@@ -155,8 +160,6 @@ __global__ void heston_almost_exact_kernel(
     float k1 = (rho * kappa / sigma - 0.5f) * dt - rho / sigma;
     float k2 = rho / sigma;
 
-    float sqrt_1_rho2 = sqrtf(1.0f - rho * rho);
-
     float log_S = logf(S0);
     float v     = v0;
 
@@ -170,15 +173,16 @@ __global__ void heston_almost_exact_kernel(
         float gamma_sample = gamma_distribution(&localState, alpha);
         v = coeff * gamma_sample;
 
-        float G1 = curand_normal(&localState);
-        float G2 = curand_normal(&localState);
+        // Independent Gaussian for the orthogonal Brownian part
+        float G = curand_normal(&localState);
 
+        // Diffusion term for almost-exact scheme
         float diffusion_term =
-            sqrtf((1.0f - rho * rho) * v_old * dt) *
-            (rho * G1 + sqrt_1_rho2 * G2);
+        sqrtf((1.0f - rho * rho) * fmaxf(v_old, 0.0f) * dt) * G;
 
-        log_S = log_S + k0 + k1 * v_old + k2 * v + diffusion_term;
-    }
+
+            log_S = log_S + k0 + k1 * v_old + k2 * v + diffusion_term;
+        }
 
     float S = expf(log_S);
     payoffs[idx] = fmaxf(S - K, 0.0f);
@@ -288,7 +292,8 @@ void generate_param_sets(ParamSet *params, int n_samples) {
         float theta = 0.01f + (float)rand() / RAND_MAX * (0.5f - 0.01f);
         float sigma = 0.1f + (float)rand() / RAND_MAX * (1.0f - 0.1f);
 
-        if (2.0f * kappa * theta > sigma * sigma) {
+        // Check Ratio Bound: RATIO_BOUND * kappa theta  > sig2 
+        if (RATIO_BOUND * kappa * theta > sigma * sigma) {
             params[count].kappa = kappa;
             params[count].theta = theta;
             params[count].sigma = sigma;
@@ -308,10 +313,11 @@ int main(void) {
     printf("===============================================================\n");
     printf("Heston Model Monte Carlo - Step 3: Performance Comparison\n");
     printf("===============================================================\n");
-    printf("Testing: κ ∈ [0.1, 10], θ ∈ [0.01, 0.5], σ ∈ [0.1, 1]\n");
-    printf("         ρ ∈ {-0.7, -0.3, 0, 0.3, 0.7}\n");
-    printf("         Δt ∈ {1/1000, 1/30}\n");
-    printf("Constraint: 2κθ > σ² (Feller condition)\n");
+    printf("Testing: kappa e [0.1, 10], theta e [0.01, 0.5], sigma e [0.1, 1]\n");
+    printf("         rho e {-0.7, -0.3, 0, 0.3, 0.7}\n");
+    printf("         delta t e {1/1000, 1/30}\n");
+    printf("Constraint: %.0f*kappa*theta > sigma^2 (Ratio Bound: sigma^2/(kappa*theta) < %.0f)\n", 
+           RATIO_BOUND, RATIO_BOUND);
     printf("Paths per test: %d\n", TOTAL_PATHS);
     printf("===============================================================\n\n");
 
@@ -320,27 +326,28 @@ int main(void) {
     ParamSet *param_sets =
         (ParamSet*)malloc(N_PARAM_SETS * sizeof(ParamSet));
 
-    printf("Generating %d random parameter sets (κ, θ, σ)...\n",
+    printf("Generating %d random parameter sets (kappa, theta, sigma)...\n",
            N_PARAM_SETS);
     generate_param_sets(param_sets, N_PARAM_SETS);
 
     printf("\nGenerated parameter sets:\n");
-    printf("%-4s %-8s %-8s %-8s %-12s\n",
-           "ID", "κ", "θ", "σ", "2κθ/σ²");
-    printf("---------------------------------------------------\n");
+    printf("%-4s %-8s %-8s %-8s %-12s %-12s\n",
+           "ID", "kappa", "theta", "sigma", "sigma^2/(kappa*theta)", "Margin");
+    printf("---------------------------------------------------------------\n");
     for (int i = 0; i < N_PARAM_SETS; ++i) {
         float k = param_sets[i].kappa;
         float t = param_sets[i].theta;
         float s = param_sets[i].sigma;
-        printf("%-4d %-8.3f %-8.4f %-8.3f %-12.3f\n",
-               i+1, k, t, s, (2*k*t)/(s*s));
+        float ratio = (s*s)/(k*t);
+        printf("%-4d %-8.3f %-8.4f %-8.3f %-12.3f %-12.3f\n",
+               i+1, k, t, s, ratio, RATIO_BOUND - ratio);
     }
     printf("\n");
 
     float rho_values[] = {-0.7f, -0.3f, 0.0f, 0.3f, 0.7f};
     int n_rho = 5;
-    int M_values[] = {1000, 30};
-    int n_M = 2;
+    int M_values[] = {1000, 300, 100, 60, 30};
+    int n_M = 5;
 
     int total_tests = N_PARAM_SETS * n_rho * n_M * 2;
     BenchmarkResult *results =
@@ -376,6 +383,10 @@ int main(void) {
         float kappa = param_sets[p].kappa;
         float theta = param_sets[p].theta;
         float sigma = param_sets[p].sigma;
+
+        float ratio = (sigma * sigma) / (kappa * theta);
+        printf("\n[Param Set %d/%d] kappa=%.3f, theta=%.4f, sigma=%.3f -> sigma^2/(kappa*theta) = %.4f\n", 
+               p+1, N_PARAM_SETS, kappa, theta, sigma, ratio);
 
         for (int rho_idx = 0; rho_idx < n_rho; ++rho_idx) {
             float rho = rho_values[rho_idx];
@@ -441,7 +452,7 @@ int main(void) {
     float avg_euler_30    = euler_time_30    / cnt_euler_30;
     float avg_ae_30       = almost_time_30   / cnt_ae_30;
 
-    printf("Δt = 1/1000 (M = 1000 steps):\n");
+    printf("delta t = 1/1000 (M = 1000 steps):\n");
     printf("  Euler:        %.2f ms (avg over %d tests)\n",
            avg_euler_1000, cnt_euler_1000);
     printf("  Almost Exact: %.2f ms (avg over %d tests)\n",
@@ -449,7 +460,7 @@ int main(void) {
     printf("  Ratio:        %.3fx (Almost/Euler)\n\n",
            avg_ae_1000 / avg_euler_1000);
 
-    printf("Δt = 1/30 (M = 30 steps):\n");
+    printf("delta t = 1/30 (M = 30 steps):\n");
     printf("  Euler:        %.2f ms (avg over %d tests)\n",
            avg_euler_30, cnt_euler_30);
     printf("  Almost Exact: %.2f ms (avg over %d tests)\n",
@@ -457,7 +468,7 @@ int main(void) {
     printf("  Ratio:        %.3fx (Almost/Euler)\n\n",
            avg_ae_30 / avg_euler_30);
 
-    printf("Impact of using Δt = 1/30:\n");
+    printf("Impact of using delta t = 1/30:\n");
     printf("  Euler speedup:        %.2fx faster\n",
            avg_euler_1000 / avg_euler_30);
     printf("  Almost Exact speedup: %.2fx faster\n\n",
@@ -484,11 +495,11 @@ int main(void) {
     printf("===============================================================\n");
     printf("KEY FINDINGS\n");
     printf("===============================================================\n");
-    printf("1. Almost Exact is ~%.1fx slower than Euler for Δt=1/1000\n",
+    printf("1. Almost Exact is ~%.1fx slower than Euler for delta t = 1/1000\n",
            avg_ae_1000 / avg_euler_1000);
-    printf("2. Almost Exact is ~%.1fx slower than Euler for Δt=1/30\n",
+    printf("2. Almost Exact is ~%.1fx slower than Euler for delta t = 1/30\n",
            avg_ae_30 / avg_euler_30);
-    printf("3. Using Δt=1/30 speeds up simulations significantly\n");
+    printf("3. Using delta t=1/30 speeds up simulations significantly\n");
     printf("4. Trade-off: Almost Exact is slower but more accurate!\n");
     printf("===============================================================\n");
 
