@@ -177,11 +177,9 @@ __global__ void heston_almost_exact_kernel(
         float G = curand_normal(&localState);
 
         // Diffusion term for almost-exact scheme
-        float diffusion_term =
-        sqrtf((1.0f - rho * rho) * fmaxf(v_old, 0.0f) * dt) * G;
+        float diffusion_term = sqrtf((1.0f - rho * rho) * fmaxf(v_old, 0.0f) * dt) * G;
 
-
-            log_S = log_S + k0 + k1 * v_old + k2 * v + diffusion_term;
+        log_S = log_S + k0 + k1 * v_old + k2 * v + diffusion_term;
         }
 
     float S = expf(log_S);
@@ -309,13 +307,19 @@ void generate_param_sets(ParamSet *params, int n_samples) {
 
 // Main Function
 int main(void) {
+    int M_values[] = {1000, 300, 100, 60, 30};
+    int n_M = 5;
 
     printf("===============================================================\n");
     printf("Heston Model Monte Carlo - Step 3: Performance Comparison\n");
     printf("===============================================================\n");
     printf("Testing: kappa e [0.1, 10], theta e [0.01, 0.5], sigma e [0.1, 1]\n");
     printf("         rho e {-0.7, -0.3, 0, 0.3, 0.7}\n");
-    printf("         delta t e {1/1000, 1/30}\n");
+    printf("M values tested: {");
+    for (int j = 0; j < n_M; ++j) {
+        printf("%d%s", M_values[j], (j == n_M-1) ? "" : ", ");
+    }
+    printf("}  (dt = T/M)\n");
     printf("Constraint: %.0f*kappa*theta > sigma^2 (Ratio Bound: sigma^2/(kappa*theta) < %.0f)\n", 
            RATIO_BOUND, RATIO_BOUND);
     printf("Paths per test: %d\n", TOTAL_PATHS);
@@ -346,8 +350,6 @@ int main(void) {
 
     float rho_values[] = {-0.7f, -0.3f, 0.0f, 0.3f, 0.7f};
     int n_rho = 5;
-    int M_values[] = {1000, 300, 100, 60, 30};
-    int n_M = 5;
 
     int total_tests = N_PARAM_SETS * n_rho * n_M * 2;
     BenchmarkResult *results =
@@ -420,62 +422,74 @@ int main(void) {
     printf("PERFORMANCE ANALYSIS\n");
     printf("===============================================================\n\n");
 
-    float euler_time_1000  = 0.0f, almost_time_1000 = 0.0f;
-    float euler_time_30    = 0.0f, almost_time_30   = 0.0f;
-    int   cnt_euler_1000   = 0,    cnt_ae_1000      = 0;
-    int   cnt_euler_30     = 0,    cnt_ae_30        = 0;
+    // We have n_M different M values: M_values[0..n_M-1]
+    float euler_time[64] = {0.0f};
+    float ae_time[64]    = {0.0f};
+    int   euler_cnt[64]  = {0};
+    int   ae_cnt[64]     = {0};
+
+    if (n_M > 64) {
+        printf("Error: n_M too large for fixed arrays\n");
+        exit(EXIT_FAILURE);
+    }
 
     for (int i = 0; i < total_tests; ++i) {
         BenchmarkResult res = results[i];
 
-        if (res.M == 1000) {
-            if (strcmp(res.method_name, "Euler") == 0) {
-                euler_time_1000 += res.time_ms;
-                cnt_euler_1000++;
-            } else {
-                almost_time_1000 += res.time_ms;
-                cnt_ae_1000++;
-            }
-        } else { // M = 30
-            if (strcmp(res.method_name, "Euler") == 0) {
-                euler_time_30 += res.time_ms;
-                cnt_euler_30++;
-            } else {
-                almost_time_30 += res.time_ms;
-                cnt_ae_30++;
-            }
+        // find index of res.M in M_values
+        int midx = -1;
+        for (int j = 0; j < n_M; ++j) {
+            if (res.M == M_values[j]) { midx = j; break; }
+        }
+        if (midx < 0) continue; // should not happen
+
+        if (strcmp(res.method_name, "Euler") == 0) {
+            euler_time[midx] += res.time_ms;
+            euler_cnt[midx]  += 1;
+        } else { // "Almost Exact"
+            ae_time[midx] += res.time_ms;
+            ae_cnt[midx]  += 1;
         }
     }
 
-    float avg_euler_1000  = euler_time_1000  / cnt_euler_1000;
-    float avg_ae_1000     = almost_time_1000 / cnt_ae_1000;
-    float avg_euler_30    = euler_time_30    / cnt_euler_30;
-    float avg_ae_30       = almost_time_30   / cnt_ae_30;
+    // Print table
+    printf("%-8s %-10s %-18s %-18s %-10s\n",
+        "M", "dt", "Euler avg (ms)", "AE avg (ms)", "AE/E");
+    printf("--------------------------------------------------------------------------\n");
 
-    printf("delta t = 1/1000 (M = 1000 steps):\n");
-    printf("  Euler:        %.2f ms (avg over %d tests)\n",
-           avg_euler_1000, cnt_euler_1000);
-    printf("  Almost Exact: %.2f ms (avg over %d tests)\n",
-           avg_ae_1000,    cnt_ae_1000);
-    printf("  Ratio:        %.3fx (Almost/Euler)\n\n",
-           avg_ae_1000 / avg_euler_1000);
+    for (int j = 0; j < n_M; ++j) {
+        float dt = T / (float)M_values[j];
 
-    printf("delta t = 1/30 (M = 30 steps):\n");
-    printf("  Euler:        %.2f ms (avg over %d tests)\n",
-           avg_euler_30, cnt_euler_30);
-    printf("  Almost Exact: %.2f ms (avg over %d tests)\n",
-           avg_ae_30,    cnt_ae_30);
-    printf("  Ratio:        %.3fx (Almost/Euler)\n\n",
-           avg_ae_30 / avg_euler_30);
+        float avgE  = (euler_cnt[j] > 0) ? (euler_time[j] / euler_cnt[j]) : 0.0f;
+        float avgAE = (ae_cnt[j]    > 0) ? (ae_time[j]    / ae_cnt[j])    : 0.0f;
+        float ratio = (avgE > 0.0f) ? (avgAE / avgE) : 0.0f;
 
-    printf("Impact of using delta t = 1/30:\n");
-    printf("  Euler speedup:        %.2fx faster\n",
-           avg_euler_1000 / avg_euler_30);
-    printf("  Almost Exact speedup: %.2fx faster\n\n",
-           avg_ae_1000 / avg_ae_30);
+        printf("%-8d %-10.6f %-18.3f %-18.3f %-10.3f\n",
+            M_values[j], dt, avgE, avgAE, ratio);
+    }
+    printf("\n");
 
-    printf("AE (M=30) vs Euler (M=1000) speedup: %.2fx\n",
-           avg_euler_1000 / avg_ae_30);
+    // Impact: compare dt=1/30 (M=30) vs dt=1/1000 (M=1000) IF both exist
+    int idx1000 = -1, idx30 = -1;
+    for (int j = 0; j < n_M; ++j) {
+        if (M_values[j] == 1000) idx1000 = j;
+        if (M_values[j] == 30)   idx30   = j;
+    }
+
+    if (idx1000 >= 0 && idx30 >= 0) {
+        float avgE1000  = euler_time[idx1000] / euler_cnt[idx1000];
+        float avgE30    = euler_time[idx30]   / euler_cnt[idx30];
+        float avgAE1000 = ae_time[idx1000]    / ae_cnt[idx1000];
+        float avgAE30   = ae_time[idx30]      / ae_cnt[idx30];
+
+        printf("Impact of using dt=1/30 (M=30) vs dt=1/1000 (M=1000):\n");
+        printf("  Euler speedup:        %.2fx faster\n", avgE1000  / avgE30);
+        printf("  Almost Exact speedup: %.2fx faster\n\n", avgAE1000 / avgAE30);
+        printf("AE (M=30) vs Euler (M=1000) speedup: %.2fx\n", avgE1000 / avgAE30);
+        printf("\n");
+    } else {
+        printf("Impact section skipped (need M=1000 and M=30 in M_values).\n\n");
+    }
 
     // 6. CSV
     printf("Saving results to benchmark_results.csv...\n");
@@ -495,12 +509,20 @@ int main(void) {
     printf("===============================================================\n");
     printf("KEY FINDINGS\n");
     printf("===============================================================\n");
-    printf("1. Almost Exact is ~%.1fx slower than Euler for delta t = 1/1000\n",
-           avg_ae_1000 / avg_euler_1000);
-    printf("2. Almost Exact is ~%.1fx slower than Euler for delta t = 1/30\n",
-           avg_ae_30 / avg_euler_30);
-    printf("3. Using delta t=1/30 speeds up simulations significantly\n");
-    printf("4. Trade-off: Almost Exact is slower but more accurate!\n");
+
+    if (idx1000 >= 0 && idx30 >= 0) {
+        float avgE1000  = euler_time[idx1000] / euler_cnt[idx1000];
+        float avgE30    = euler_time[idx30]   / euler_cnt[idx30];
+        float avgAE1000 = ae_time[idx1000]    / ae_cnt[idx1000];
+        float avgAE30   = ae_time[idx30]      / ae_cnt[idx30];
+
+        printf("1. At M=1000: AE/Euler = %.2fx\n", avgAE1000 / avgE1000);
+        printf("2. At M=30:   AE/Euler = %.2fx\n", avgAE30   / avgE30);
+        printf("3. Using M=30 speeds up Euler by %.2fx, AE by %.2fx (vs M=1000)\n",
+            avgE1000 / avgE30, avgAE1000 / avgAE30);
+    } else {
+        printf("Key findings require M=1000 and M=30 in M_values.\n");
+    }
     printf("===============================================================\n");
 
     // Cleanup
