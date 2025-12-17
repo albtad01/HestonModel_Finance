@@ -307,8 +307,8 @@ void generate_param_sets(ParamSet *params, int n_samples) {
 
 // Main Function
 int main(void) {
-    int M_values[] = {1000, 300, 100, 60, 30};
-    int n_M = 5;
+    int M_values[] = {100000, 10000, 5000, 1000, 300, 100, 60, 30};
+    int n_M = 8;
 
     printf("===============================================================\n");
     printf("Heston Model Monte Carlo - Step 3: Performance Comparison\n");

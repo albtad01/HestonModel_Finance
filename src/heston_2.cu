@@ -16,10 +16,10 @@
 #define kappa 0.5f
 #define theta 0.1f
 #define sigma 0.3f
-#define rho -0.5f
+#define rho 0.0f
 #define T 1.0f
 #define K 1.0f
-#define M 1000 // Number of time steps (Δt = 1/M)
+#define M 1000 // Number of time steps (dt = 1/M)
 
 // Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
@@ -42,14 +42,14 @@ __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
 __device__ float gamma_distribution(curandState *state, float alpha) {
     float boost_factor = 1.0f;
 
-    // Case α < 1
+    // Case alpha < 1
     if (alpha < 1.0f) {
         float u = curand_uniform(state);
         boost_factor = powf(u, 1.0f / alpha);
         alpha += 1.0f;
     }
 
-    // Case α >= 1
+    // Case alpha >= 1
     float d = alpha - 1.0f / 3.0f;
     float c = 1.0f / sqrtf(9.0f * d);
 
@@ -98,13 +98,13 @@ __global__ void heston_exact_kernel(float *payoffs, curandState *states) {
         
         float v_old = v;
         
-        // Step 1: Simulate v_{t+Δt} using exact distribution
+        // Step 1: Simulate v_{t+dt} using exact distribution
         float lambda = 2.0f * kappa * exp_kappa_dt * v_old / (sigma * sigma * (1.0f - exp_kappa_dt));
         
-        // N ~ Poisson(λ)
+        // N ~ Poisson(lambda)
         unsigned int N = curand_poisson(&localState, lambda);
         
-        // Fix applicato: alpha = d + N
+        // alpha = d + N
         float alpha = d + (float)N;  
         float gamma_sample = gamma_distribution(&localState, alpha);
         
@@ -113,14 +113,13 @@ __global__ void heston_exact_kernel(float *payoffs, curandState *states) {
         vI += 0.5f * (v_old + v) * dt;
     }
     
-    // ∫₀¹ √vₛ dWₛ = (v₁ - v₀ - κθ + κvI) / σ
     float integral_sqrt_v_dW = (v - v0 - kappa * theta + kappa * vI) / sigma;
     
-    // Compute m and sigma²
+    // Compute m and sigma^2
     float m = -0.5f * vI + rho * integral_sqrt_v_dW;
     float Sigma2 = (1.0f - rho * rho) * vI;
     
-    // Sample S₁ = exp(m + Σ·G) where G is N(0,1)
+    // Sample S_1 = exp(m + SIGMA·G) where G is N(0,1)
     float G = curand_normal(&localState);
     float S1 = S0 * expf(m + sqrtf(Sigma2) * G);
     
@@ -159,7 +158,7 @@ float heston_exact_simulation() {
 
     testCUDA(cudaMalloc(&d_payoffs, TOTAL_PATHS * sizeof(float)));
     testCUDA(cudaMalloc(&d_partial_sums, NUM_BLOCKS * sizeof(float)));
-    testCUDA(cudaMalloc(&d_states, TOTAL_PATHS * sizeof(curandState))); // Allocazione stati
+    testCUDA(cudaMalloc(&d_states, TOTAL_PATHS * sizeof(curandState))); 
     
     // 1. Random number generator initialization
     printf("Initializing RNG states...\n");
@@ -204,9 +203,9 @@ float heston_exact_simulation() {
     
     printf("\n=== Exact Simulation Results ===\n");
     printf("Method: Exact variance distribution + Poisson + Gamma\n");
-    printf("Parameters: κ=%.2f, θ=%.2f, σ=%.2f, ρ=%.2f\n", kappa, theta, sigma, rho);
-    printf("Paths: %d, Time steps: %d (Δt=%.6f)\n", TOTAL_PATHS, M, T/(float)M);
-    printf("Option price E[(S₁ - 1)₊] = %.6f\n", option_price);
+    printf("Parameters: k=%.2f, theta=%.2f, sigma=%.2f, rho=%.2f\n", kappa, theta, sigma, rho);
+    printf("Paths: %d, Time steps: %d (dt=%.6f)\n", TOTAL_PATHS, M, T/(float)M);
+    printf("Option price E[(S_1 - 1)_+] = %.6f\n", option_price);
     printf("Execution time (Simulation only): %.3f ms (%.2f M paths/sec)\n", 
            time_ms, TOTAL_PATHS / (time_ms * 1000.0f));
     printf("================================\n");
@@ -228,16 +227,14 @@ int main(void) {
     printf("Heston Model Monte Carlo - Step 2: Exact Simulation\n");
     printf("============================================================\n");
     printf("Using exact distribution for variance:\n");
-    printf("  v_{t+Δt} ~ σ²(1-e^{-κΔt})/(2κ) × χ²(d+2N, λ)\n");
-    printf("  N ~ Poisson(λ), χ² simulated via Gamma distribution\n");
     printf("============================================================\n");
     
     float price = heston_exact_simulation();
     
-    printf("\nVerification: Feller condition 2κθ > σ²\n");
-    printf("  2κθ = %.4f, σ² = %.4f → %s\n", 
+    printf("\nVerification: Feller condition 2*k*theta > sigma^2\n");
+    printf("  2*k*theta = %.4f, sigma^2 = %.4f -> %s\n", 
            2*kappa*theta, sigma*sigma,
-           (2*kappa*theta > sigma*sigma) ? "✓ Satisfied" : "✗ NOT satisfied");
+           (2*kappa*theta > sigma*sigma) ? "Satisfied!" : "NOT satisfied");
     
     return 0;
 }

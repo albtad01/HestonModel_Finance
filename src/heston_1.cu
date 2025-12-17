@@ -19,7 +19,7 @@
 #define rho 0.0f
 #define T 1.0f
 #define K 1.0f
-#define M 1000  // Number of time steps (Δt = 1/M)
+#define M 1000  // Number of time steps (dt = 1/M)
 
 // Function to catch CUDA errors
 void testCUDA(cudaError_t error, const char *file, int line) {
@@ -43,6 +43,7 @@ __global__ void init_rng_kernel(curandState *states, unsigned long seed) {
 __global__ void heston_euler_kernel(float *payoffs, curandState *states, int use_abs) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= TOTAL_PATHS) return;
     
     curandState localState = states[idx];
     
@@ -66,11 +67,9 @@ __global__ void heston_euler_kernel(float *payoffs, curandState *states, int use
         float dZ = rho * G1 + sqrt_1_minus_rho2 * G2;
         
         // Update asset price S using equation (4)
-        // S_{t+Δt} = S_t + r*S_t*Δt + √v_t * S_t * √Δt * dZ
         S = S + r * S * dt + sqrtf(fmaxf(v, 0.0f)) * S * sqrt_dt * dZ;
         
         // Update variance v using equation (5)
-        // v_{t+Δt} = g(v_t + κ(θ-v_t)Δt + σ√v_t√Δt*G1)
         float v_new = v + kappa * (theta - v) * dt + sigma * sqrtf(fmaxf(v, 0.0f)) * sqrt_dt * G1;
         
         // Apply function g: either (·)+ or |·|
@@ -167,8 +166,8 @@ float heston_euler_simulation(int use_abs, int verbose = 1) {
     
     if (verbose) {
         printf("\n=== Euler Discretization (g = %s) ===\n", use_abs ? "|·|" : "(·)+");
-        printf("Parameters: κ=%.2f, θ=%.2f, σ=%.2f, ρ=%.2f\n", kappa, theta, sigma, rho);
-        printf("Paths: %d, Time steps: %d (Δt = %.6f)\n", TOTAL_PATHS, M, T/(float)M);
+        printf("Parameters: k=%.2f, theta=%.2f, sigma=%.2f, rho=%.2f\n", kappa, theta, sigma, rho);
+        printf("Paths: %d, Time steps: %d (dt = %.6f)\n", TOTAL_PATHS, M, T/(float)M);
         printf("Estimated option price E[(S_1 - 1)+] = %.6f\n", option_price);
         printf("Execution time: %.3f ms\n", elapsed_time);
     }
@@ -189,10 +188,6 @@ int main(void) {
     
     printf("=============================================================\n");
     printf("Heston Model Monte Carlo Simulation - Step 1: Euler Scheme\n");
-    printf("=============================================================\n");
-    printf("Model: dS_t = rS_t dt + √v_t S_t dẐ_t\n");
-    printf("       dv_t = κ(θ - v_t)dt + σ√v_t dW_t\n");
-    printf("       Ẑ_t = ρW_t + √(1-ρ²)Z_t\n");
     printf("=============================================================\n");
     printf("Initial values: S_0 = %.2f, v_0 = %.2f\n", S0, v0);
     printf("Parameters: r = %.2f, K = %.2f, T = %.2f\n", r, K, T);
