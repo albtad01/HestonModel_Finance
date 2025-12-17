@@ -182,13 +182,6 @@ float heston_exact_simulation() {
     reduction_kernel<<<NUM_BLOCKS, THREADS_PER_BLOCK, THREADS_PER_BLOCK * sizeof(float)>>>(
         d_payoffs, d_partial_sums, TOTAL_PATHS);
     testCUDA(cudaGetLastError());
-    
-    // End of GPU 
-    testCUDA(cudaEventRecord(stop, 0));
-    testCUDA(cudaEventSynchronize(stop));
-    
-    float time_ms;
-    testCUDA(cudaEventElapsedTime(&time_ms, start, stop));
 
     // Copy and sum on CPU
     float *h_partial_sums = (float*)malloc(NUM_BLOCKS * sizeof(float));
@@ -201,6 +194,13 @@ float heston_exact_simulation() {
     }
     
     float option_price = total / TOTAL_PATHS;
+
+    // End of GPU 
+    testCUDA(cudaEventRecord(stop, 0));
+    testCUDA(cudaEventSynchronize(stop));
+    
+    float time_ms;
+    testCUDA(cudaEventElapsedTime(&time_ms, start, stop));
     
     printf("\n=== Exact Simulation Results ===\n");
     printf("Method: Exact variance distribution + Poisson + Gamma\n");

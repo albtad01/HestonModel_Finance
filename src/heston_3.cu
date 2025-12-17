@@ -242,9 +242,6 @@ BenchmarkResult run_benchmark(
         d_payoffs, d_partial_sums, TOTAL_PATHS);
     testCUDA(cudaGetLastError());
 
-    testCUDA(cudaEventRecord(stop, 0));
-    testCUDA(cudaEventSynchronize(stop));
-
     // Sum on host
     testCUDA(cudaMemcpy(h_partial_sums, d_partial_sums,
                         NUM_BLOCKS * sizeof(float),
@@ -255,6 +252,9 @@ BenchmarkResult run_benchmark(
         total += h_partial_sums[i];
 
     float price = (float)(total / TOTAL_PATHS);
+    
+    testCUDA(cudaEventRecord(stop, 0));
+    testCUDA(cudaEventSynchronize(stop));
 
     float time_ms;
     testCUDA(cudaEventElapsedTime(&time_ms, start, stop));
