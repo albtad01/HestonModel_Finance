@@ -2,6 +2,7 @@
 // Heston Model Monte Carlo - Step 2: Exact Simulation with Gamma Distribution
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include <curand_kernel.h>
 
