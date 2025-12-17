@@ -1,286 +1,141 @@
-![Exact Heston simulation demo](results/demo_heston_2.gif)
 
-# Heston Model – GPU Monte Carlo Pricing
+![Euler Heston paths demo](results/heston_euler_paths.gif)
 
-CUDA implementation of Monte Carlo pricing for a European call option under the
-Heston stochastic volatility model.
+# Heston Model – GPU Monte Carlo Pricing (CUDA)
 
-The core of the project consists of three CUDA programs:
+CUDA Monte Carlo pricing for a European call under the Heston stochastic volatility model.
 
-- `heston_1.cu` – Euler discretisation of $(S_t, v_t)$
-- `heston_2.cu` – (almost) exact simulation of the variance process
-- `heston_3.cu` – performance benchmark over many parameter sets
+## Summary
 
-On top of that, a small Python toolkit is provided to analyse benchmark results
-and to animate a subset of simulated price paths.
+This repository implements GPU-accelerated Monte Carlo schemes (CUDA) to price a European call option under the Heston stochastic volatility model. It contains three CUDA programs that progressively improve the variance discretisation and a set of Python utilities in `graphs/` to produce plots and animations from the generated CSV outputs.
+
+Core programs:
+- `src/heston_1.cu` – Step 1: Euler scheme for $(S_t, v_t)$
+- `src/heston_2.cu` – Step 2: exact CIR transition for $v_t$ (Poisson–Gamma / noncentral chi-square) + terminal pricing
+- `src/heston_3.cu` – Step 3: benchmark (runtime / price) over many parameter sets and time steps
+
+Python utilities in `graphs/` generate plots and animations from CSV outputs.
 
 ---
 
-## Mathematical model (short)
+## Model (short)
 
-We consider the Heston model
-
+Heston dynamics:
 $$
 \begin{aligned}
-dS_t &= r S_t \,dt + \sqrt{v_t}\, S_t \, d\widetilde W_t, \\
-dv_t &= \kappa(\theta - v_t)\,dt + \sigma \sqrt{v_t}\, dW_t, \\
-\widetilde W_t &= \rho W_t + \sqrt{1-\rho^2}\, Z_t,
+dS_t &= r S_t\,dt + \sqrt{v_t}\,S_t\,dW_t^{(1)},\\
+dv_t &= \kappa(\theta - v_t)\,dt + \sigma\sqrt{v_t}\,dW_t^{(2)},\\
+\mathrm{corr}(dW_t^{(1)}, dW_t^{(2)}) &= \rho,\qquad \rho\in[-1,1].
 \end{aligned}
 $$
 
-and price a European call
-
+European call price:
 $$
-C_0 = e^{-rT}\,\mathbb{E}[(S_T - K)^+].
-$$
-
-In the “almost exact” scheme the variance step uses the CIR
-noncentral–chi–square / gamma representation
-
-$$
-v_{t+\Delta t}
-=
-\frac{\sigma^2 (1 - e^{-\kappa \Delta t})}{2\kappa}\;\mathcal G(d + N),
+C_0 = e^{-rT}\,\mathbb{E}\big[(S_T-K)^+\big].
 $$
 
-with $N\sim\mathrm{Poisson}(\lambda)$ and $\mathcal G(\cdot)$ a gamma random
-variable.
+---
+
+## Implementation Overview
+
+Step 1 — Euler scheme (`src/heston_1.cu`)
+
+Each GPU thread simulates one independent path. Correlated standard Gaussians $G_1,G_2\sim\mathcal{N}(0,1)$ are combined to obtain the Brownian increments:
+$$
+\Delta W^{(1)} = \sqrt{\Delta t}\,G_1,\qquad
+\Delta W^{(2)} = \sqrt{\Delta t}\,(\rho G_1 + \sqrt{1-\rho^2}\,G_2).
+$$
+
+The Euler discretisation (with simple variance truncation) reads:
+$$
+\begin{aligned}
+S_{t+\Delta t} &= S_t + r S_t\Delta t + S_t\sqrt{v_t}\,\Delta W^{(1)},\\
+v_{t+\Delta t} &= g\big(v_t + \kappa(\theta - v_t)\Delta t + \sigma\sqrt{v_t}\,\Delta W^{(2)}\big),
+\end{aligned}
+$$
+where $g(x)$ enforces non-negativity (for example $g(x)=\max(x,0)$ or $g(x)=|x|$). Payoffs are reduced to a single price estimate (discounted sample average of $(S_T-K)^+$).
+
+Step 2 — Exact variance transition (`src/heston_2.cu`)
+
+The variance $v_t$ follows a CIR process. This step uses its exact transition distribution (equivalently the noncentral chi-square law, implemented as a Poisson–Gamma mixture) to sample $v_{t+\Delta t}$ exactly. Implementation highlights:
+- device Gamma sampler that handles both shape regimes ($\alpha\ge1$ and $\alpha<1$),
+- per-thread time loop updating $v_t$ exactly and computing the terminal payoff,
+- outputs only the terminal price estimate (no full path saved).
+
+Step 3 — Benchmark (`src/heston_3.cu`)
+
+Runs both methods (Euler / Almost Exact) across many parameter sets and time steps and writes `results/benchmark_results.csv` with columns: (params, M, $\Delta t$, method, time_ms, price).
 
 ---
 
 ## Repository layout
 
-```text
+```
 HestonModel_Finance/
-├── README.md
 ├── docs/
-│   └── subjects.pdf              # project assignment
+│   └── subjects.pdf
 ├── src/
-│   ├── compile.sh                # helper script to build all CUDA codes
-│   ├── heston_1.cu               # Step 1 – Euler scheme
-│   ├── heston_2.cu               # Step 2 – exact / almost exact variance
-│   └── heston_3.cu               # Step 3 – benchmark
+│   ├── compile.sh
+│   ├── heston_1.cu
+│   ├── heston_2.cu
+│   └── heston_3.cu
 ├── graphs/
-│   ├── analyze_benchmark.py      # plots from benchmark_results.csv
-│   ├── animate_paths.py          # animation for selected price paths
-│   └── heston_paths.cu           # Euler paths → results/paths.csv
+│   ├── animate_paths.py
+│   ├── animate_paths_euler.py
+│   ├── heston_paths.cu
+│   ├── make_scatterplot.py
+│   ├── plot_error.py
+│   └── plot_performance.py
 └── results/
-		├── benchmark_results.csv
-		├── boxplot_time_by_method_M.png
-		├── scatter_time_vs_params.png
-		├── hist_price_diff.png
-		├── hist_rel_error.png
-		├── paths.csv
-		├── payoff_vs_time.png
-		├── demo_heston_2.mp4
-		└── heston_paths_trading_style.mp4
+	├── benchmark_results.csv
+	├── fig_error_vs_dt_ref_AE_M1e5.pdf
+	├── fig_hist_deltaP_Euler_minus_AE_ref_M1e5_M30.pdf
+	├── heston_euler_paths.gif
+	├── hist_price_diff.png
+	├── par_k.png
+	├── par_theta.png
+	├── par_sigma.png
+	├── paths.csv
+	└── scatterplot_k_theta_sigma.png
 ```
 
----
+## Build & run (CUDA)
 
-## Build & run – CUDA programs
+Requirements:
+- NVIDIA GPU (tested with `sm_70`)
+- CUDA toolkit (`nvcc`) + `curand`
 
-### Requirements (GPU side)
+From repo root:
 
-- NVIDIA GPU with compute capability ≥ `sm_70`
-- CUDA toolkit (`nvcc`, `curand`)
-
-All examples below assume you are in the repository root.
-
----
-
-## Step 1 – Euler discretisation (`src/heston_1.cu`)
-
-Goal: basic Monte Carlo pricing using Euler steps for both $S_t$ and $v_t$,
-with two ways of truncating the variance:
-
-- $g(x)=x^+=\max(x,0)$
-- $g(x)=|x|$
-
-Each GPU thread simulates one independent path with
-
-$$
-S_{t+\Delta t} = S_t + r S_t\,\Delta t + \sqrt{v_t}\, S_t\, \sqrt{\Delta t}\,(\rho\,G_1 + \sqrt{1-\rho^2}\,G_2),
-$$
-
-and stores the terminal payoff $(S_T-K)^+$ in global memory.
-
-Typical configuration in the code:
-
-```text
-THREADS_PER_BLOCK = 256
-NUM_BLOCKS        = 1024
-TOTAL_PATHS       = 262144
-M                 = 1000  # time steps
-```
-
-Compile & run:
-
-```bash
+```sh
 cd src
-nvcc -o heston_1 heston_1.cu -lcurand -arch=sm_70
+bash compile.sh
 ./heston_1
-cd ..
-```
-
----
-
-## Step 2 – Exact / almost exact scheme (`src/heston_2.cu`)
-
-Goal: remove the bias of the Euler scheme on the variance by:
-
-- simulating $v_t$ with the gamma–based exact law of the CIR process (Poisson + gamma),
-- using the closed–form representation of $\int_0^T \sqrt{v_s}\, dW_s$, 
-- drawing $S_T$ from a log–normal variable with parameters depending on $v_0$, $v_T$ and $\int_0^T v_s\, ds$.
-
-Key ingredients:
-
-- device function `gamma_distribution(curandState*, float alpha)` implementing Andersen’s algorithm with non-recursive handling of `alpha < 1`,
-- kernel `heston_exact_kernel` that
-	- loops over time, updates $v_t$ exactly and accumulates $v_I \approx \int_0^T v_s\, ds$,
-	- computes the Brownian integral and the log-spot parameters,
-	- samples $S_T$ with a single Gaussian,
-	- writes the payoff.
-
-Compile & run:
-
-```bash
-cd src
-nvcc -o heston_2 heston_2.cu -lcurand -arch=sm_70
 ./heston_2
-cd ..
-```
-
-The program prints the estimated option price and the GPU time for
-`TOTAL_PATHS = 262144` and `M = 1000`.
-
----
-
-## Step 3 – Performance benchmark (`src/heston_3.cu`)
-
-Goal: compare execution time and prices of
-
-- Euler scheme
-- “Almost exact” scheme
-
-over a parameter grid:
-
-- $\kappa\in[0.1,10]$
-- $\theta\in[0.01,0.5]$
-- $\sigma\in[0.1,1]$
-- $\rho\in\{-0.7,-0.3,0,0.3,0.7\}$
-- time steps $M\in\{1000,30\}$
-
-subject to the Feller condition $2\kappa\theta>\sigma^2$.
-
-For each test:
-
-- Euler and Almost Exact are run with `TOTAL_PATHS = 262144` paths,
-- GPU times are measured with CUDA events,
-- results are stored in `results/benchmark_results.csv`.
-
-Compile & run:
-
-```bash
-cd src
-nvcc -o heston_3 heston_3.cu -lcurand -arch=sm_70
 ./heston_3
 cd ..
 ```
 
----
+Alternatively, compile a single file:
 
-## Optional: Python tools (analysis & animations)
+```sh
+cd src
+nvcc -O3 -o heston_1 heston_1.cu -lcurand -arch=sm_70
+./heston_1
+cd ..
+```
 
-### Requirements (Python side)
+## Python utilities (plots & animations)
 
-- Python ≥ 3.8
+Python requirements:
 - `numpy`, `pandas`, `matplotlib`
-- `ffmpeg` available on the system PATH (for MP4 export)
+- `ffmpeg` (for MP4 / GIF export)
 
-Example environment:
-
-```bash
-conda create -n heston python=3.12
-conda activate heston
-pip install numpy pandas matplotlib
-# install ffmpeg with your OS package manager
-```
-
-All Python commands below assume you run them from the repository root.
+Use the scripts in `graphs/` to generate figures from the CSV outputs in `results/`.
 
 ---
 
-## Benchmark plots (`graphs/analyze_benchmark.py`)
-
-After running `heston_3` you should have `results/benchmark_results.csv`.
-
-Analyse it with:
-
-```bash
-conda activate heston
-python graphs/analyze_benchmark.py
-```
-
-This script produces several figures under `results/`, including
-
-![Execution time vs parameters](results/scatter_time_vs_params.png)
-
-Figure – Execution time vs Heston parameters $\kappa,\theta,\sigma$.
-Each dot corresponds to one CUDA run with 262,144 simulated paths.
-Colours distinguish Euler / Almost Exact and $M\in\{30,1000\}$.
-
-Other figures:
-
-- `results/boxplot_time_by_method_M.png` – boxplot of timings grouped by method and $M$
-- `results/hist_price_diff.png` – histogram of price differences (Almost Exact $M=30$ vs Euler $M=1000$)
-- `results/hist_rel_error.png` – histogram of relative errors.
-
----
-
-## Saving sample paths (`graphs/heston_paths.cu`)
-
-To create a small set of full price paths suitable for visualisation:
-
-```bash
-nvcc -o heston_paths graphs/heston_paths.cu -lcurand -arch=sm_70
-./heston_paths
-```
-
-This runs an Euler simulation (with the same settings as Step 1) and writes
-
-```text
-results/paths.csv
-```
-
-with:
-
-- first column: time grid $t_0,\ldots,t_M$,
-- next columns: $N_{\mathrm{SAVE}}=50$ full paths $S_t^{(i)}$.
-
----
-
-## Path animation (`graphs/animate_paths.py`)
-
-Once `results/paths.csv` exists, you can generate a dark “trading-style”
-animation:
-
-```bash
-conda activate heston
-python graphs/animate_paths.py
-```
-
-This produces:
-
-```text
-results/heston_paths_trading_style.mp4
-```
-
-The animation shows:
-
-- a dark background chart,
-- about 20 sample paths (subset of the 50 saved),
-- the mean path $\mathbb{E}[S(t)]$ as a brighter line,
-- the strike $K$ as a white dashed horizontal line,
-- an overlay with the current time $t$ and the current value of $\mathbb{E}[S(t)]$.
-
+If you want, I can:
+- run a quick check that `readme.md` was written correctly,
+- open or preview the GIF in `results/heston_euler_paths.gif`,
+- or commit the updated `readme.md`.
