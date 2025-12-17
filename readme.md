@@ -18,56 +18,6 @@ Python utilities in `graphs/` generate plots and animations from CSV outputs.
 
 ---
 
-## Model (short)
-
-Heston dynamics:
-$$
-\begin{aligned}
-dS_t &= r S_t\,dt + \sqrt{v_t}\,S_t\,dW_t^{(1)},\\
-dv_t &= \kappa(\theta - v_t)\,dt + \sigma\sqrt{v_t}\,dW_t^{(2)},\\
-\mathrm{corr}(dW_t^{(1)}, dW_t^{(2)}) &= \rho,\qquad \rho\in[-1,1].
-\end{aligned}
-$$
-
-European call price:
-$$
-C_0 = e^{-rT}\,\mathbb{E}\big[(S_T-K)^+\big].
-$$
-
----
-
-## Implementation Overview
-
-Step 1 — Euler scheme (`src/heston_1.cu`)
-
-Each GPU thread simulates one independent path. Correlated standard Gaussians $G_1,G_2\sim\mathcal{N}(0,1)$ are combined to obtain the Brownian increments:
-$$
-\Delta W^{(1)} = \sqrt{\Delta t}\,G_1,\qquad
-\Delta W^{(2)} = \sqrt{\Delta t}\,(\rho G_1 + \sqrt{1-\rho^2}\,G_2).
-$$
-
-The Euler discretisation (with simple variance truncation) reads:
-$$
-\begin{aligned}
-S_{t+\Delta t} &= S_t + r S_t\Delta t + S_t\sqrt{v_t}\,\Delta W^{(1)},\\
-v_{t+\Delta t} &= g\big(v_t + \kappa(\theta - v_t)\Delta t + \sigma\sqrt{v_t}\,\Delta W^{(2)}\big),
-\end{aligned}
-$$
-where $g(x)$ enforces non-negativity (for example $g(x)=\max(x,0)$ or $g(x)=|x|$). Payoffs are reduced to a single price estimate (discounted sample average of $(S_T-K)^+$).
-
-Step 2 — Exact variance transition (`src/heston_2.cu`)
-
-The variance $v_t$ follows a CIR process. This step uses its exact transition distribution (equivalently the noncentral chi-square law, implemented as a Poisson–Gamma mixture) to sample $v_{t+\Delta t}$ exactly. Implementation highlights:
-- device Gamma sampler that handles both shape regimes ($\alpha\ge1$ and $\alpha<1$),
-- per-thread time loop updating $v_t$ exactly and computing the terminal payoff,
-- outputs only the terminal price estimate (no full path saved).
-
-Step 3 — Benchmark (`src/heston_3.cu`)
-
-Runs both methods (Euler / Almost Exact) across many parameter sets and time steps and writes `results/benchmark_results.csv` with columns: (params, M, $\Delta t$, method, time_ms, price).
-
----
-
 ## Repository layout
 
 ```
